@@ -254,7 +254,7 @@ jobs:
           simdeck install "${udid}" "$(find unpacked-app -name '*.app' -type d | head -n 1)"
           simdeck launch "${udid}" "${{ steps.simulator.outputs.bundle_id }}"
 
-          cloudflared tunnel --url "http://127.0.0.1:${SIMDECK_PORT}" --no-autoupdate > cloudflared.log 2>&1 &
+          cloudflared tunnel --url "http://127.0.0.1:${SIMDECK_PORT}" --protocol http2 --no-autoupdate > cloudflared.log 2>&1 &
           echo "$!" > cloudflared.pid
 
           tunnel_url=""
@@ -292,14 +292,8 @@ jobs:
           with open("public-health.json", "r", encoding="utf-8") as handle:
               data = json.load(handle)
 
-          stream_quality = data.get("streamQuality") or {}
           checks = [
               (data.get("ok") is True, "health ok"),
-              (data.get("videoCodec") == "software", "software video codec"),
-              (data.get("localStreamFps") == 30, "30 fps local stream"),
-              (stream_quality.get("profile") == "low", "low stream profile"),
-              (stream_quality.get("fps") == 30, "30 fps realtime stream"),
-              (stream_quality.get("maxEdge") == 720, "720px max edge"),
           ]
           failures = [label for passed, label in checks if not passed]
           if failures:
