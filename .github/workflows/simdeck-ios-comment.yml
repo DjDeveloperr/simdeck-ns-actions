@@ -262,8 +262,17 @@ jobs:
           echo "access_token=${encoded_access_token}" >> "${GITHUB_OUTPUT}"
 
           public_health_url="${tunnel_url}/api/health?simdeckToken=${encoded_access_token}"
+          tunnel_host="${tunnel_url#https://}"
+          tunnel_host="${tunnel_host%%/*}"
+
+          public_health_check() {
+            curl -fsS "${public_health_url}" >/dev/null ||
+              curl -fsS --resolve "${tunnel_host}:443:104.16.230.132" "${public_health_url}" >/dev/null ||
+              curl -fsS --resolve "${tunnel_host}:443:104.16.231.132" "${public_health_url}" >/dev/null
+          }
+
           for attempt in {1..150}; do
-            if curl -fsS "${public_health_url}" >/dev/null; then
+            if public_health_check; then
               exit 0
             fi
             sleep 2
