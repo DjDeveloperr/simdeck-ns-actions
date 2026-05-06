@@ -21,7 +21,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Select latest Xcode
         run: |
@@ -30,7 +30,7 @@ jobs:
           xcrun simctl list runtimes available
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -58,7 +58,7 @@ jobs:
           echo "zip_path=artifacts/${app_name}.zip" >> "${GITHUB_OUTPUT}"
 
       - name: Upload simulator app artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ios-simulator-app-${{ github.sha }}
           path: ${{ steps.package.outputs.zip_path }}
