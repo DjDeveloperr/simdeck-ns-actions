@@ -200,6 +200,9 @@ jobs:
         run: |
           set -euo pipefail
           udid="${{ steps.simulator.outputs.udid }}"
+          access_token="$(openssl rand -hex 32)"
+          metadata_path="${RUNNER_TEMP:-/tmp}/simdeck-daemon-${GITHUB_RUN_ID}.json"
+
           SIMDECK_VIDEO_CODEC=software \
             SIMDECK_REALTIME_STREAM=1 \
             SIMDECK_STREAM_QUALITY_PROFILE=low \
@@ -208,26 +211,36 @@ jobs:
             SIMDECK_REALTIME_MIN_BITRATE=900000 \
             SIMDECK_REALTIME_BITS_PER_PIXEL=2 \
             SIMDECK_LOCAL_STREAM_FPS=30 \
-            simdeck daemon start \
+            simdeck daemon run \
+            --project-root "${GITHUB_WORKSPACE}" \
+            --metadata-path "${metadata_path}" \
             --port "${SIMDECK_PORT}" \
             --bind 127.0.0.1 \
             --video-codec software \
             --stream-quality ci-software \
-            --local-stream-fps 30
+            --local-stream-fps 30 \
+            --access-token "${access_token}" \
+            --pairing-code 000000 \
+            > simdeck-daemon.log 2>&1 &
+          echo "$!" > simdeck.pid
 
-          status_json="$(simdeck daemon status)"
-          access_token="$(python3 -c '
-          import json
-          import sys
-
-          data = json.load(sys.stdin)
-          daemon = data.get("daemon") or {}
-          print(daemon.get("accessToken") or daemon.get("access_token") or "")
-          ' <<< "${status_json}")"
-
-          if [[ -z "${access_token}" ]]; then
-            echo "SimDeck daemon status did not include an API access token" >&2
-            echo "${status_json}" >&2
+          local_health_url="http://127.0.0.1:${SIMDECK_PORT}/api/health?simdeckToken=${access_token}"
+          local_ready=0
+          for attempt in {1..30}; do
+            if curl -fsS "${local_health_url}" >/dev/null; then
+              local_ready=1
+              break
+            fi
+            if ! kill -0 "$(cat simdeck.pid)" 2>/dev/null; then
+              cat simdeck-daemon.log >&2
+              echo "SimDeck daemon exited before becoming healthy" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          if [[ "${local_ready}" -ne 1 ]]; then
+            cat simdeck-daemon.log >&2
+            echo "SimDeck daemon did not become healthy" >&2
             exit 1
           fi
 
@@ -349,6 +362,9 @@ jobs:
           set +e
           if [[ -f cloudflared.pid ]]; then
             kill "$(cat cloudflared.pid)"
+          fi
+          if [[ -f simdeck.pid ]]; then
+            kill "$(cat simdeck.pid)"
           fi
           simdeck daemon stop
           if [[ -n "${{ steps.simulator.outputs.udid }}" ]]; then
