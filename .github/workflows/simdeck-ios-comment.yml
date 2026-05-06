@@ -72,23 +72,23 @@ jobs:
           echo "SIMULATOR_UDID=${udid}" >> "${GITHUB_ENV}"
           echo "Prebooting ${udid}"
           xcrun simctl boot "${udid}" || true
-          (xcrun simctl bootstatus "${udid}" -b > /tmp/sim-boot.log 2>&1) &
-          echo "$!" > /tmp/sim-boot.pid
+          xcrun simctl bootstatus "${udid}" -b > /tmp/sim-boot.log 2>&1 &
 
-      - name: Acknowledge command
+      - name: Create status comment
         run: |
-          post_comment() {
+          create_status_comment() {
             local body="$1"
             for attempt in {1..5}; do
-              if gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="${body}"; then
+              comment_id="$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="${body}" --jq '.id')" && {
+                echo "SIMDECK_STATUS_COMMENT_ID=${comment_id}" >> "${GITHUB_ENV}"
                 return 0
-              fi
+              }
               sleep $((attempt * 5))
             done
             return 1
           }
 
-          post_comment "Starting a SimDeck iOS session for this pull request. I will post the tunnel URL here when it is ready." || true
+          create_status_comment "Starting a SimDeck iOS session for this pull request. I will update this comment with the tunnel URL when it is ready." || true
 
       - name: Resolve PR head
         id: pr
@@ -140,7 +140,7 @@ jobs:
             exit 1
           }
 
-      - name: Boot simulator and launch app
+      - name: Install app
         id: simulator
         run: |
           set -euo pipefail
@@ -155,11 +155,6 @@ jobs:
           app_path="$(find unpacked-app -name '*.app' -type d | head -n 1)"
           if [[ -z "${app_path}" ]]; then
             echo "The artifact did not contain an .app bundle" >&2
-            exit 1
-          fi
-
-          if [[ -z "${SIMULATOR_UDID}" ]]; then
-            echo "SIMULATOR_UDID was not set by the preboot step" >&2
             exit 1
           fi
 
@@ -208,20 +203,20 @@ jobs:
 
           echo "url=${tunnel_url}" >> "${GITHUB_OUTPUT}"
 
-      - name: Publish tunnel URL
+      - name: Update status comment with tunnel URL
         run: |
           cat > comment.md <<'EOF'
           SimDeck iOS session is ready: ${{ steps.stream.outputs.url }}?device=${{ steps.simulator.outputs.udid }}
 
           App: `${{ steps.simulator.outputs.bundle_id }}`
           Commit: `${{ steps.pr.outputs.sha }}`
-          Defaults: software encoding, CI software stream quality, 30 fps.
 
           This session will stop after 30 minutes, or earlier if the simulator shuts down.
           EOF
 
+          body="$(cat comment.md)"
           for attempt in {1..5}; do
-            if gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="$(cat comment.md)"; then
+            if [[ -n "${SIMDECK_STATUS_COMMENT_ID:-}" ]] && gh api -X PATCH "repos/${REPO}/issues/comments/${SIMDECK_STATUS_COMMENT_ID}" -f body="${body}"; then
               exit 0
             fi
             sleep $((attempt * 5))
@@ -258,12 +253,12 @@ jobs:
             xcrun simctl shutdown "${{ steps.simulator.outputs.udid }}"
           fi
 
-      - name: Report session end
+      - name: Update status comment at end
         if: always()
         run: |
           body="SimDeck iOS session for commit \`${{ steps.pr.outputs.sha }}\` has ended. Re-run it by commenting \`simdeck run ios\`."
           for attempt in {1..5}; do
-            if gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="${body}"; then
+            if [[ -n "${SIMDECK_STATUS_COMMENT_ID:-}" ]] && gh api -X PATCH "repos/${REPO}/issues/comments/${SIMDECK_STATUS_COMMENT_ID}" -f body="${body}"; then
               exit 0
             fi
             sleep $((attempt * 5))
