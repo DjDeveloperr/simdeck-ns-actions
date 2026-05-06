@@ -228,7 +228,7 @@ jobs:
           echo "access_token=${encoded_access_token}" >> "${GITHUB_OUTPUT}"
 
           public_health_url="${tunnel_url}/api/health?simdeckToken=${encoded_access_token}"
-          for attempt in {1..30}; do
+          for attempt in {1..150}; do
             if curl -fsS "${public_health_url}" >/dev/null; then
               exit 0
             fi
