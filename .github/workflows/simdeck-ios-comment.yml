@@ -207,11 +207,19 @@ jobs:
         run: |
           set -euo pipefail
           udid="${{ steps.simulator.outputs.udid }}"
-          simdeck daemon start \
+          SIMDECK_VIDEO_CODEC=software \
+            SIMDECK_REALTIME_STREAM=1 \
+            SIMDECK_STREAM_QUALITY_PROFILE=low \
+            SIMDECK_REALTIME_MAX_EDGE=720 \
+            SIMDECK_REALTIME_FPS=30 \
+            SIMDECK_REALTIME_MIN_BITRATE=900000 \
+            SIMDECK_REALTIME_BITS_PER_PIXEL=2 \
+            SIMDECK_LOCAL_STREAM_FPS=30 \
+            simdeck daemon start \
             --port "${SIMDECK_PORT}" \
             --bind 127.0.0.1 \
             --video-codec software \
-            --stream-quality ci-software \
+            --stream-quality low \
             --local-stream-fps 30
 
           status_json="$(simdeck daemon status)"
@@ -266,13 +274,35 @@ jobs:
           tunnel_host="${tunnel_host%%/*}"
 
           public_health_check() {
-            curl -fsS "${public_health_url}" >/dev/null ||
-              curl -fsS --resolve "${tunnel_host}:443:104.16.230.132" "${public_health_url}" >/dev/null ||
-              curl -fsS --resolve "${tunnel_host}:443:104.16.231.132" "${public_health_url}" >/dev/null
+            curl -fsS "${public_health_url}" -o public-health.json ||
+              curl -fsS --resolve "${tunnel_host}:443:104.16.230.132" "${public_health_url}" -o public-health.json ||
+              curl -fsS --resolve "${tunnel_host}:443:104.16.231.132" "${public_health_url}" -o public-health.json
+          }
+
+          verify_public_health() {
+            python3 - <<'PY'
+          import json
+
+          with open("public-health.json", "r", encoding="utf-8") as handle:
+              data = json.load(handle)
+
+          stream_quality = data.get("streamQuality") or {}
+          checks = [
+              (data.get("ok") is True, "health ok"),
+              (data.get("videoCodec") == "software", "software video codec"),
+              (data.get("localStreamFps") == 30, "30 fps local stream"),
+              (stream_quality.get("profile") == "low", "low stream profile"),
+              (stream_quality.get("fps") == 30, "30 fps realtime stream"),
+              (stream_quality.get("maxEdge") == 720, "720px max edge"),
+          ]
+          failures = [label for passed, label in checks if not passed]
+          if failures:
+              raise SystemExit(f"Public health check failed: {', '.join(failures)}")
+          PY
           }
 
           for attempt in {1..150}; do
-            if public_health_check; then
+            if public_health_check && verify_public_health; then
               exit 0
             fi
             sleep 2
