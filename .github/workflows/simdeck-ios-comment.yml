@@ -135,7 +135,7 @@ jobs:
       - name: Wait for simulator
         run: |
           set -euo pipefail
-          wait "$(cat /tmp/sim-boot.pid)" || {
+          xcrun simctl bootstatus "${SIMULATOR_UDID}" -b || {
             cat /tmp/sim-boot.log || true
             exit 1
           }
