@@ -1,0 +1,246 @@
+name: SimDeck iOS Comment
+
+on:
+  issue_comment:
+    types:
+      - created
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: simdeck-ios-pr-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  run-ios:
+    name: Run PR app in SimDeck
+    if: >-
+      ${{
+        github.event.issue.pull_request &&
+        github.event.comment.body == 'simdeck run ios'
+      }}
+    runs-on: macos-26
+    timeout-minutes: 35
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.issue.number }}
+      SIMDECK_PORT: "4310"
+      SIMDECK_BUNDLE_ID: dev.dj.simdecknsactions
+
+    steps:
+      - name: Select Xcode and preboot simulator
+        run: |
+          set -euo pipefail
+
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+          xcodebuild -showsdks
+
+          udid="$(xcrun simctl list devices available --json | python3 -c '
+          import json
+          import re
+          import sys
+
+          data = json.load(sys.stdin)
+          choices = []
+          for runtime, devices in data.get("devices", {}).items():
+              if "iOS" not in runtime:
+                  continue
+              version = tuple(int(x) for x in re.findall(r"\d+", runtime)[:3]) or (0,)
+              for index, device in enumerate(devices):
+                  name = device.get("name", "")
+                  if device.get("isAvailable") and "iPhone" in name:
+                      choices.append((version, -index, device["udid"], name))
+
+          if not choices:
+              raise SystemExit("No available iPhone simulator was found")
+
+          choices.sort(reverse=True)
+          print(choices[0][2])
+          print(f"Selected {choices[0][3]}", file=sys.stderr)
+          ')"
+
+          echo "SIMULATOR_UDID=${udid}" >> "${GITHUB_ENV}"
+          echo "Prebooting ${udid}"
+          xcrun simctl boot "${udid}" || true
+          (xcrun simctl bootstatus "${udid}" -b > /tmp/sim-boot.log 2>&1) &
+          echo "$!" > /tmp/sim-boot.pid
+
+      - name: Acknowledge command
+        run: |
+          gh issue comment "${PR_NUMBER}" \
+            --repo "${REPO}" \
+            --body "Starting a SimDeck iOS session for this pull request. I will post the tunnel URL here when it is ready."
+
+      - name: Resolve PR head
+        id: pr
+        run: |
+          set -euo pipefail
+          echo "sha=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.sha')" >> "${GITHUB_OUTPUT}"
+          echo "ref=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.ref')" >> "${GITHUB_OUTPUT}"
+          echo "repo=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.repo.full_name')" >> "${GITHUB_OUTPUT}"
+
+      - name: Download simulator artifact for PR head
+        run: |
+          set -euo pipefail
+          sha="${{ steps.pr.outputs.sha }}"
+          artifact_name="ios-simulator-app-${sha}"
+          mkdir -p downloaded-app
+
+          run_id=""
+          for attempt in {1..30}; do
+            run_id="$(gh api --paginate "repos/${REPO}/actions/workflows/build-ios-simulator.yml/runs?per_page=100" \
+              --jq ".workflow_runs[] | select(.head_sha == \"${sha}\" and .conclusion == \"success\") | .id" \
+              | head -n 1 || true)"
+
+            if [[ -n "${run_id}" ]]; then
+              echo "Using build workflow run ${run_id} for ${sha}"
+              gh run download "${run_id}" --repo "${REPO}" --name "${artifact_name}" --dir downloaded-app
+              exit 0
+            fi
+
+            echo "Waiting for a successful iOS simulator build artifact for ${sha} (${attempt}/30)"
+            sleep 20
+          done
+
+          echo "No successful '${artifact_name}' artifact was found for PR head ${sha}." >&2
+          exit 1
+
+      - name: Install SimDeck and Cloudflare Tunnel
+        run: |
+          set -euo pipefail
+          npm install -g simdeck@latest
+          brew install cloudflared
+          simdeck --version
+          cloudflared --version
+
+      - name: Wait for simulator
+        run: |
+          set -euo pipefail
+          wait "$(cat /tmp/sim-boot.pid)" || {
+            cat /tmp/sim-boot.log || true
+            exit 1
+          }
+
+      - name: Boot simulator and launch app
+        id: simulator
+        run: |
+          set -euo pipefail
+          app_zip="$(find downloaded-app -name '*.app.zip' -type f | head -n 1)"
+          if [[ -z "${app_zip}" ]]; then
+            echo "No downloaded .app.zip artifact was found" >&2
+            exit 1
+          fi
+
+          mkdir -p unpacked-app
+          ditto -x -k "${app_zip}" unpacked-app
+          app_path="$(find unpacked-app -name '*.app' -type d | head -n 1)"
+          if [[ -z "${app_path}" ]]; then
+            echo "The artifact did not contain an .app bundle" >&2
+            exit 1
+          fi
+
+          if [[ -z "${SIMULATOR_UDID}" ]]; then
+            echo "SIMULATOR_UDID was not set by the preboot step" >&2
+            exit 1
+          fi
+
+          udid="${SIMULATOR_UDID}"
+          echo "udid=${udid}" >> "${GITHUB_OUTPUT}"
+          xcrun simctl install "${udid}" "${app_path}"
+
+          bundle_id="$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "${app_path}/Info.plist" 2>/dev/null || true)"
+          if [[ -z "${bundle_id}" || "${bundle_id}" == *'$('* || "${bundle_id}" == *'${'* ]]; then
+            bundle_id="${SIMDECK_BUNDLE_ID}"
+          fi
+          echo "bundle_id=${bundle_id}" >> "${GITHUB_OUTPUT}"
+
+      - name: Start SimDeck and tunnel
+        id: stream
+        run: |
+          set -euo pipefail
+          udid="${{ steps.simulator.outputs.udid }}"
+          simdeck daemon start \
+            --port "${SIMDECK_PORT}" \
+            --bind 127.0.0.1 \
+            --video-codec software \
+            --stream-quality ci-software \
+            --local-stream-fps 30
+
+          simdeck install "${udid}" "$(find unpacked-app -name '*.app' -type d | head -n 1)"
+          simdeck launch "${udid}" "${{ steps.simulator.outputs.bundle_id }}"
+
+          cloudflared tunnel --url "http://127.0.0.1:${SIMDECK_PORT}" --no-autoupdate > cloudflared.log 2>&1 &
+          echo "$!" > cloudflared.pid
+
+          tunnel_url=""
+          for attempt in {1..60}; do
+            tunnel_url="$(grep -Eo 'https://[-a-zA-Z0-9.]+\\.trycloudflare\\.com' cloudflared.log | head -n 1 || true)"
+            if [[ -n "${tunnel_url}" ]]; then
+              break
+            fi
+            sleep 2
+          done
+
+          if [[ -z "${tunnel_url}" ]]; then
+            cat cloudflared.log >&2
+            echo "Cloudflare Tunnel did not produce a public URL" >&2
+            exit 1
+          fi
+
+          echo "url=${tunnel_url}" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish tunnel URL
+        run: |
+          cat > comment.md <<'EOF'
+          SimDeck iOS session is ready: ${{ steps.stream.outputs.url }}?device=${{ steps.simulator.outputs.udid }}
+
+          App: `${{ steps.simulator.outputs.bundle_id }}`
+          Commit: `${{ steps.pr.outputs.sha }}`
+          Defaults: software encoding, CI software stream quality, 30 fps.
+
+          This session will stop after 30 minutes, or earlier if the simulator shuts down.
+          EOF
+          gh issue comment "${PR_NUMBER}" --repo "${REPO}" --body-file comment.md
+
+      - name: Keep session alive
+        run: |
+          set -euo pipefail
+          udid="${{ steps.simulator.outputs.udid }}"
+          end=$((SECONDS + 1800))
+
+          while (( SECONDS < end )); do
+            state="$(xcrun simctl list devices | awk -v udid="${udid}" '$0 ~ udid { print $0 }')"
+            if [[ "${state}" != *"(Booted)"* ]]; then
+              echo "Simulator ${udid} is no longer booted; stopping session."
+              exit 0
+            fi
+
+            curl -fsS "http://127.0.0.1:${SIMDECK_PORT}/api/health" >/dev/null
+            sleep 15
+          done
+
+      - name: Stop session
+        if: always()
+        run: |
+          set +e
+          if [[ -f cloudflared.pid ]]; then
+            kill "$(cat cloudflared.pid)"
+          fi
+          simdeck daemon stop
+          if [[ -n "${{ steps.simulator.outputs.udid }}" ]]; then
+            xcrun simctl shutdown "${{ steps.simulator.outputs.udid }}"
+          fi
+
+      - name: Report session end
+        if: always()
+        run: |
+          gh issue comment "${PR_NUMBER}" \
+            --repo "${REPO}" \
+            --body "SimDeck iOS session for commit \`${{ steps.pr.outputs.sha }}\` has ended. Re-run it by commenting \`simdeck run ios\`."

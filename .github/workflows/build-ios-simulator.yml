@@ -1,0 +1,66 @@
+name: Build iOS Simulator
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-simulator-${{ github.event.pull_request.number || github.ref }}-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build iOS simulator app
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+          xcrun simctl list runtimes available
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build simulator app
+        run: npm run build:ios:simulator
+
+      - name: Package simulator app
+        id: package
+        run: |
+          set -euo pipefail
+          app_path="$(find platforms/ios/build -path '*Debug-iphonesimulator/*.app' -maxdepth 6 -type d | head -n 1)"
+          if [[ -z "${app_path}" ]]; then
+            echo "No simulator .app was produced under platforms/ios/build" >&2
+            exit 1
+          fi
+
+          mkdir -p artifacts
+          app_name="$(basename "${app_path}")"
+          ditto -c -k --sequesterRsrc --keepParent "${app_path}" "artifacts/${app_name}.zip"
+          echo "app_path=${app_path}" >> "${GITHUB_OUTPUT}"
+          echo "zip_path=artifacts/${app_name}.zip" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload simulator app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-simulator-app-${{ github.sha }}
+          path: ${{ steps.package.outputs.zip_path }}
+          if-no-files-found: error
+          retention-days: 7
