@@ -212,7 +212,7 @@ jobs:
             --port "${SIMDECK_PORT}" \
             --bind 127.0.0.1 \
             --video-codec software \
-            --stream-quality low \
+            --stream-quality ci-software \
             --local-stream-fps 30
 
           status_json="$(simdeck daemon status)"
