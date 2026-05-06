@@ -20,6 +20,9 @@ as its first macOS step, overlaps that boot with setup and artifact download, an
 only waits for boot right before install/launch. The streamed session stops
 after 30 minutes, or earlier if the simulator is no longer booted.
 
+This branch is a disposable test target for the edited SimDeck status comment
+flow.
+
 ## Local build
 
 ```sh
