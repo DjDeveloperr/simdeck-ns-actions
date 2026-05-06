@@ -9,7 +9,7 @@ permissions:
   actions: read
   contents: read
   issues: write
-  pull-requests: read
+  pull-requests: write
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -77,9 +77,18 @@ jobs:
 
       - name: Acknowledge command
         run: |
-          gh issue comment "${PR_NUMBER}" \
-            --repo "${REPO}" \
-            --body "Starting a SimDeck iOS session for this pull request. I will post the tunnel URL here when it is ready."
+          post_comment() {
+            local body="$1"
+            for attempt in {1..5}; do
+              if gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="${body}"; then
+                return 0
+              fi
+              sleep $((attempt * 5))
+            done
+            return 1
+          }
+
+          post_comment "Starting a SimDeck iOS session for this pull request. I will post the tunnel URL here when it is ready." || true
 
       - name: Resolve PR head
         id: pr
@@ -210,7 +219,15 @@ jobs:
 
           This session will stop after 30 minutes, or earlier if the simulator shuts down.
           EOF
-          gh issue comment "${PR_NUMBER}" --repo "${REPO}" --body-file comment.md
+
+          for attempt in {1..5}; do
+            if gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="$(cat comment.md)"; then
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+
+          exit 1
 
       - name: Keep session alive
         run: |
@@ -244,6 +261,11 @@ jobs:
       - name: Report session end
         if: always()
         run: |
-          gh issue comment "${PR_NUMBER}" \
-            --repo "${REPO}" \
-            --body "SimDeck iOS session for commit \`${{ steps.pr.outputs.sha }}\` has ended. Re-run it by commenting \`simdeck run ios\`."
+          body="SimDeck iOS session for commit \`${{ steps.pr.outputs.sha }}\` has ended. Re-run it by commenting \`simdeck run ios\`."
+          for attempt in {1..5}; do
+            if gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="${body}"; then
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          exit 0

@@ -41,6 +41,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Resolve artifact commit
+        id: artifact
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "sha=${{ github.event.pull_request.head.sha }}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "sha=${{ github.sha }}" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Build simulator app
         run: npm run build:ios:simulator
 
@@ -63,7 +72,7 @@ jobs:
       - name: Upload simulator app artifact
         uses: actions/upload-artifact@v5
         with:
-          name: ios-simulator-app-${{ github.sha }}
+          name: ios-simulator-app-${{ steps.artifact.outputs.sha }}
           path: ${{ steps.package.outputs.zip_path }}
           if-no-files-found: error
           retention-days: 7
