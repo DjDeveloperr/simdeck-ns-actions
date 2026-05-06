@@ -180,6 +180,29 @@ jobs:
             --stream-quality ci-software \
             --local-stream-fps 30
 
+          status_json="$(simdeck daemon status)"
+          access_token="$(python3 -c '
+          import json
+          import sys
+
+          data = json.load(sys.stdin)
+          daemon = data.get("daemon") or {}
+          print(daemon.get("accessToken") or daemon.get("access_token") or "")
+          ' <<< "${status_json}")"
+
+          if [[ -z "${access_token}" ]]; then
+            echo "SimDeck daemon status did not include an API access token" >&2
+            echo "${status_json}" >&2
+            exit 1
+          fi
+
+          encoded_access_token="$(ACCESS_TOKEN="${access_token}" python3 -c '
+          import os
+          import urllib.parse
+
+          print(urllib.parse.quote(os.environ["ACCESS_TOKEN"], safe=""))
+          ')"
+
           simdeck install "${udid}" "$(find unpacked-app -name '*.app' -type d | head -n 1)"
           simdeck launch "${udid}" "${{ steps.simulator.outputs.bundle_id }}"
 
@@ -202,11 +225,24 @@ jobs:
           fi
 
           echo "url=${tunnel_url}" >> "${GITHUB_OUTPUT}"
+          echo "access_token=${encoded_access_token}" >> "${GITHUB_OUTPUT}"
+
+          public_health_url="${tunnel_url}/api/health?simdeckToken=${encoded_access_token}"
+          for attempt in {1..30}; do
+            if curl -fsS "${public_health_url}" >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "SimDeck public health check failed through Cloudflare Tunnel" >&2
+          cat cloudflared.log >&2
+          exit 1
 
       - name: Update status comment with tunnel URL
         run: |
           cat > comment.md <<'EOF'
-          SimDeck iOS session is ready: ${{ steps.stream.outputs.url }}?device=${{ steps.simulator.outputs.udid }}
+          SimDeck iOS session is ready: ${{ steps.stream.outputs.url }}?device=${{ steps.simulator.outputs.udid }}&simdeckToken=${{ steps.stream.outputs.access_token }}
 
           App: `${{ steps.simulator.outputs.bundle_id }}`
           Commit: `${{ steps.pr.outputs.sha }}`
