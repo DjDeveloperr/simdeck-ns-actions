@@ -26,3 +26,8 @@ after 30 minutes, or earlier if the simulator is no longer booted.
 npm ci
 npm run build:ios:simulator
 ```
+
+## Comment trigger
+
+Open a pull request and comment `simdeck run ios` to start a temporary streamed
+iOS simulator session for that pull request's latest built commit.
