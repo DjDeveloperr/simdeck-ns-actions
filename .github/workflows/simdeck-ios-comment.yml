@@ -34,10 +34,7 @@ jobs:
     if: >-
       ${{
         github.event_name == 'workflow_dispatch' ||
-        (
-          github.event.issue.pull_request &&
-          contains(github.event.comment.body, 'simdeck run ios')
-        )
+        contains(github.event.comment.body, 'simdeck run ios')
       }}
     runs-on: macos-26
     timeout-minutes: 35
