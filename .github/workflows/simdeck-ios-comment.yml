@@ -11,9 +11,10 @@ on:
         description: SimDeck command/experiment flags
         required: true
         default: simdeck run ios
-  issue_comment:
-    types:
-      - created
+      status_comment_id:
+        description: Existing issue comment id to update
+        required: false
+        default: ""
 
 permissions:
   actions: read
@@ -33,8 +34,7 @@ jobs:
     name: Run PR app in SimDeck
     if: >-
       ${{
-        github.event_name == 'workflow_dispatch' ||
-        contains(github.event.comment.body, 'simdeck run ios')
+        github.event_name == 'workflow_dispatch'
       }}
     runs-on: macos-26
     timeout-minutes: 35
@@ -42,8 +42,9 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
-      PR_NUMBER: ${{ github.event.issue.number || inputs.pr_number }}
-      SIMDECK_COMMENT_BODY: ${{ github.event.comment.body || inputs.command }}
+      PR_NUMBER: ${{ inputs.pr_number }}
+      SIMDECK_COMMENT_BODY: ${{ inputs.command }}
+      SIMDECK_STATUS_COMMENT_ID_INPUT: ${{ inputs.status_comment_id }}
       SIMDECK_PORT: "4310"
       SIMDECK_BUNDLE_ID: dev.dj.simdecknsactions
 
@@ -51,6 +52,11 @@ jobs:
       - name: Create status comment
         run: |
           set -euo pipefail
+          if [[ -n "${SIMDECK_STATUS_COMMENT_ID_INPUT}" ]]; then
+            echo "SIMDECK_STATUS_COMMENT_ID=${SIMDECK_STATUS_COMMENT_ID_INPUT}" >> "${GITHUB_ENV}"
+            exit 0
+          fi
+
           status_body="Starting a SimDeck iOS session for this pull request. I will update this comment with the tunnel URL when it is ready."
 
           for attempt in {1..5}; do
