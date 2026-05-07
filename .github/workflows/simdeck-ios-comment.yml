@@ -109,7 +109,6 @@ jobs:
           set -euo pipefail
           date +%s > /tmp/sim-boot-start
 
-          xcrun simctl list devices available
           udid="$(xcrun simctl list devices available --json | SIMDECK_DEVICE_STRATEGY="${SIMDECK_DEVICE_STRATEGY}" python3 -c '
           import json
           import re
@@ -170,30 +169,18 @@ jobs:
             date +%s > /tmp/sim-boot-end
           ) &
 
-      - name: Restore provider tool cache
-        id: provider-tool-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            .tools/cloudflared
-            .tools/npm-cache
-            .tools/npm-global
-          key: simdeck-provider-tools-${{ runner.os }}-${{ runner.arch }}-v1
-
       - name: Install SimDeck and Cloudflare Tunnel
         run: |
           set -euo pipefail
           npm_prefix="${GITHUB_WORKSPACE}/.tools/npm-global"
-          npm_cache="${GITHUB_WORKSPACE}/.tools/npm-cache"
           cloudflared_dir="${GITHUB_WORKSPACE}/.tools/cloudflared"
-          mkdir -p "${npm_prefix}" "${npm_cache}" "${cloudflared_dir}"
+          mkdir -p "${npm_prefix}" "${cloudflared_dir}"
 
           export NPM_CONFIG_PREFIX="${npm_prefix}"
-          export NPM_CONFIG_CACHE="${npm_cache}"
           export PATH="${npm_prefix}/bin:${cloudflared_dir}:${PATH}"
 
           if ! command -v simdeck >/dev/null 2>&1; then
-            npm install -g simdeck@latest --prefer-offline --no-audit --no-fund
+            npm install -g simdeck@latest --no-audit --no-fund
           fi
 
           if ! command -v cloudflared >/dev/null 2>&1; then
@@ -214,16 +201,6 @@ jobs:
           echo "${cloudflared_dir}" >> "${GITHUB_PATH}"
           simdeck --version
           cloudflared --version
-
-      - name: Save provider tool cache
-        if: steps.provider-tool-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            .tools/cloudflared
-            .tools/npm-cache
-            .tools/npm-global
-          key: simdeck-provider-tools-${{ runner.os }}-${{ runner.arch }}-v1
 
       - name: Start SimDeck and tunnel
         id: stream
