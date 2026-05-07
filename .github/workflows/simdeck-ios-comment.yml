@@ -175,7 +175,20 @@ jobs:
           access_token="$(openssl rand -hex 32)"
           metadata_path="${RUNNER_TEMP:-/tmp}/simdeck-daemon-${GITHUB_RUN_ID}.json"
 
+          simdeck daemon stop || true
+          existing_pid="$(lsof -ti tcp:"${SIMDECK_PORT}" -sTCP:LISTEN | head -n 1 || true)"
+          if [[ -n "${existing_pid}" ]]; then
+            kill "${existing_pid}" || true
+            sleep 2
+          fi
+          if lsof -ti tcp:"${SIMDECK_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+            echo "Port ${SIMDECK_PORT} is still in use before starting SimDeck" >&2
+            lsof -nP -iTCP:"${SIMDECK_PORT}" -sTCP:LISTEN >&2 || true
+            exit 1
+          fi
+
           SIMDECK_VIDEO_CODEC=software \
+            SIMDECK_ALLOWED_ORIGINS='*' \
             SIMDECK_REALTIME_STREAM=1 \
             SIMDECK_STREAM_QUALITY_PROFILE=low \
             SIMDECK_REALTIME_MAX_EDGE=720 \
@@ -199,14 +212,14 @@ jobs:
           local_health_url="http://127.0.0.1:${SIMDECK_PORT}/api/health?simdeckToken=${access_token}"
           local_ready=0
           for attempt in {1..30}; do
-            if curl -fsS "${local_health_url}" >/dev/null; then
-              local_ready=1
-              break
-            fi
             if ! kill -0 "$(cat simdeck.pid)" 2>/dev/null; then
               cat simdeck-daemon.log >&2
               echo "SimDeck daemon exited before becoming healthy" >&2
               exit 1
+            fi
+            if curl -fsS "${local_health_url}" >/dev/null; then
+              local_ready=1
+              break
             fi
             sleep 1
           done
@@ -287,7 +300,7 @@ jobs:
       - name: Update status comment with tunnel URL
         run: |
           cat > comment.md <<'EOF'
-          SimDeck iOS session is ready: ${{ steps.stream.outputs.url }}?device=${{ steps.simulator.outputs.udid }}&simdeckToken=${{ steps.stream.outputs.access_token }}
+          SimDeck iOS session is ready: [Open SimDeck](${{ steps.stream.outputs.url }}?simdeckToken=${{ steps.stream.outputs.access_token }}&device=${{ steps.simulator.outputs.udid }})
 
           App: `${{ steps.simulator.outputs.bundle_id }}`
           Commit: `${{ steps.pr.outputs.sha }}`
