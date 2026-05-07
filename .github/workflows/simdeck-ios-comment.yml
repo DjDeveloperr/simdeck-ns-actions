@@ -268,8 +268,7 @@ jobs:
           print(urllib.parse.quote(os.environ["ACCESS_TOKEN"], safe=""))
           ')"
 
-          simdeck install "${udid}" "$(find unpacked-app -name '*.app' -type d | head -n 1)"
-          simdeck launch "${udid}" "${{ steps.simulator.outputs.bundle_id }}"
+          xcrun simctl launch "${udid}" "${{ steps.simulator.outputs.bundle_id }}"
 
           cloudflared tunnel --url "http://127.0.0.1:${SIMDECK_PORT}" --protocol http2 --no-autoupdate > cloudflared.log 2>&1 &
           echo "$!" > cloudflared.pid
@@ -357,13 +356,18 @@ jobs:
           end=$((SECONDS + 1800))
 
           while (( SECONDS < end )); do
+            if [[ -f simdeck.pid ]] && ! kill -0 "$(cat simdeck.pid)" 2>/dev/null; then
+              echo "SimDeck daemon process exited; stopping session."
+              exit 1
+            fi
+
             state="$(xcrun simctl list devices | awk -v udid="${udid}" '$0 ~ udid { print $0 }')"
             if [[ "${state}" != *"(Booted)"* ]]; then
               echo "Simulator ${udid} is no longer booted; stopping session."
               exit 0
             fi
 
-            curl -fsS "http://127.0.0.1:${SIMDECK_PORT}/api/health" >/dev/null
+            curl -fsS "http://127.0.0.1:${SIMDECK_PORT}/api/health?simdeckToken=${{ steps.stream.outputs.access_token }}" >/dev/null
             sleep 15
           done
 
