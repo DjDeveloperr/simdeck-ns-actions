@@ -229,6 +229,38 @@ jobs:
             exit 1
           fi
 
+          curl -fsS -D local-root.headers -o /dev/null "http://127.0.0.1:${SIMDECK_PORT}/"
+          daemon_access_token="$(python3 - <<'PY'
+          from http.cookies import SimpleCookie
+
+          token = ""
+          with open("local-root.headers", "r", encoding="utf-8", errors="ignore") as handle:
+              for line in handle:
+                  name, _, value = line.partition(":")
+                  if name.lower() != "set-cookie":
+                      continue
+                  cookie = SimpleCookie()
+                  cookie.load(value.strip())
+                  if "simdeck_token" in cookie:
+                      token = cookie["simdeck_token"].value
+          print(token)
+          PY
+          )"
+          if [[ -z "${daemon_access_token}" ]]; then
+            cat local-root.headers >&2
+            echo "SimDeck root response did not set a simdeck_token cookie" >&2
+            exit 1
+          fi
+          access_token="${daemon_access_token}"
+
+          curl -fsS \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-SimDeck-Token: ${access_token}" \
+            --data '{"fps":30,"profile":"balanced","videoCodec":"software"}' \
+            "http://127.0.0.1:${SIMDECK_PORT}/api/stream-quality" \
+            >/dev/null
+
           encoded_access_token="$(ACCESS_TOKEN="${access_token}" python3 -c '
           import os
           import urllib.parse
