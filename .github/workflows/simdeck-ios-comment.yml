@@ -70,11 +70,11 @@ jobs:
         run: |
           set -euo pipefail
           body="${SIMDECK_COMMENT_BODY}"
-          simulator_cache=0
+          simulator_cache=1
           device_strategy=small
 
-          if [[ "${body}" == *" cache-sim"* ]]; then
-            simulator_cache=1
+          if [[ "${body}" == *" no-cache-sim"* ]]; then
+            simulator_cache=0
           fi
           if [[ "${body}" == *" latest-device"* ]]; then
             device_strategy=latest
