@@ -56,6 +56,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          date +%s > /tmp/sim-boot-start
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           xcodebuild -version
           xcodebuild -showsdks
@@ -87,99 +88,71 @@ jobs:
           echo "SIMULATOR_UDID=${udid}" >> "${GITHUB_ENV}"
           echo "Prebooting ${udid}"
           xcrun simctl boot "${udid}" || true
-          xcrun simctl bootstatus "${udid}" -b > /tmp/sim-boot.log 2>&1 &
+          (
+            xcrun simctl bootstatus "${udid}" -b > /tmp/sim-boot.log 2>&1
+            date +%s > /tmp/sim-boot-end
+          ) &
 
-      - name: Resolve PR head
-        id: pr
-        run: |
-          set -euo pipefail
-          gh api "repos/${REPO}/pulls/${PR_NUMBER}" > pr.json
-          python3 - <<'PY' >> "${GITHUB_OUTPUT}"
-          import json
-
-          with open("pr.json", "r", encoding="utf-8") as handle:
-              pr = json.load(handle)
-
-          print(f"sha={pr['head']['sha']}")
-          print(f"ref={pr['head']['ref']}")
-          print(f"repo={pr['head']['repo']['full_name']}")
-          PY
-
-      - name: Download simulator artifact for PR head
-        run: |
-          set -euo pipefail
-          sha="${{ steps.pr.outputs.sha }}"
-          artifact_name="ios-simulator-app-${sha}"
-          mkdir -p downloaded-app
-
-          run_id=""
-          for attempt in {1..30}; do
-            run_id="$(gh api --paginate "repos/${REPO}/actions/workflows/build-ios-simulator.yml/runs?per_page=100" \
-              --jq ".workflow_runs[] | select(.head_sha == \"${sha}\" and .conclusion == \"success\") | .id" \
-              | head -n 1 || true)"
-
-            if [[ -n "${run_id}" ]]; then
-              echo "Using build workflow run ${run_id} for ${sha}"
-              gh run download "${run_id}" --repo "${REPO}" --name "${artifact_name}" --dir downloaded-app
-              exit 0
-            fi
-
-            echo "Waiting for a successful iOS simulator build artifact for ${sha} (${attempt}/30)"
-            sleep 20
-          done
-
-          echo "No successful '${artifact_name}' artifact was found for PR head ${sha}." >&2
-          exit 1
+      - name: Restore provider tool cache
+        id: provider-tool-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .tools/cloudflared
+            .tools/npm-cache
+            .tools/npm-global
+          key: simdeck-provider-tools-${{ runner.os }}-${{ runner.arch }}-v1
 
       - name: Install SimDeck and Cloudflare Tunnel
         run: |
           set -euo pipefail
-          npm install -g simdeck@latest
-          brew install cloudflared
+          npm_prefix="${GITHUB_WORKSPACE}/.tools/npm-global"
+          npm_cache="${GITHUB_WORKSPACE}/.tools/npm-cache"
+          cloudflared_dir="${GITHUB_WORKSPACE}/.tools/cloudflared"
+          mkdir -p "${npm_prefix}" "${npm_cache}" "${cloudflared_dir}"
+
+          export NPM_CONFIG_PREFIX="${npm_prefix}"
+          export NPM_CONFIG_CACHE="${npm_cache}"
+          export PATH="${npm_prefix}/bin:${cloudflared_dir}:${PATH}"
+
+          if ! command -v simdeck >/dev/null 2>&1; then
+            npm install -g simdeck@latest --prefer-offline --no-audit --no-fund
+          fi
+
+          if ! command -v cloudflared >/dev/null 2>&1; then
+            case "$(uname -m)" in
+              arm64) cloudflared_arch="arm64" ;;
+              x86_64) cloudflared_arch="amd64" ;;
+              *)
+                echo "Unsupported macOS architecture: $(uname -m)" >&2
+                exit 1
+                ;;
+            esac
+            curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-${cloudflared_arch}.tgz" \
+              | tar -xz -C "${cloudflared_dir}"
+            chmod +x "${cloudflared_dir}/cloudflared"
+          fi
+
+          echo "${npm_prefix}/bin" >> "${GITHUB_PATH}"
+          echo "${cloudflared_dir}" >> "${GITHUB_PATH}"
           simdeck --version
           cloudflared --version
 
-      - name: Wait for simulator
-        run: |
-          set -euo pipefail
-          xcrun simctl bootstatus "${SIMULATOR_UDID}" -b || {
-            cat /tmp/sim-boot.log || true
-            exit 1
-          }
-
-      - name: Install app
-        id: simulator
-        run: |
-          set -euo pipefail
-          app_zip="$(find downloaded-app -name '*.app.zip' -type f | head -n 1)"
-          if [[ -z "${app_zip}" ]]; then
-            echo "No downloaded .app.zip artifact was found" >&2
-            exit 1
-          fi
-
-          mkdir -p unpacked-app
-          ditto -x -k "${app_zip}" unpacked-app
-          app_path="$(find unpacked-app -name '*.app' -type d | head -n 1)"
-          if [[ -z "${app_path}" ]]; then
-            echo "The artifact did not contain an .app bundle" >&2
-            exit 1
-          fi
-
-          udid="${SIMULATOR_UDID}"
-          echo "udid=${udid}" >> "${GITHUB_OUTPUT}"
-          xcrun simctl install "${udid}" "${app_path}"
-
-          bundle_id="$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "${app_path}/Info.plist" 2>/dev/null || true)"
-          if [[ -z "${bundle_id}" || "${bundle_id}" == *'$('* || "${bundle_id}" == *'${'* ]]; then
-            bundle_id="${SIMDECK_BUNDLE_ID}"
-          fi
-          echo "bundle_id=${bundle_id}" >> "${GITHUB_OUTPUT}"
+      - name: Save provider tool cache
+        if: steps.provider-tool-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .tools/cloudflared
+            .tools/npm-cache
+            .tools/npm-global
+          key: simdeck-provider-tools-${{ runner.os }}-${{ runner.arch }}-v1
 
       - name: Start SimDeck and tunnel
         id: stream
         run: |
           set -euo pipefail
-          udid="${{ steps.simulator.outputs.udid }}"
+          udid="${SIMULATOR_UDID}"
           access_token="$(openssl rand -hex 32)"
           metadata_path="${RUNNER_TEMP:-/tmp}/simdeck-daemon-${GITHUB_RUN_ID}.json"
 
@@ -265,7 +238,7 @@ jobs:
             -X POST \
             -H "Content-Type: application/json" \
             -H "X-SimDeck-Token: ${access_token}" \
-            --data '{"fps":30,"profile":"ci-software","videoCodec":"software"}' \
+            --data '{"fps":30,"maxEdge":720,"minBitrate":900000,"bitsPerPixel":2,"videoCodec":"software"}' \
             "http://127.0.0.1:${SIMDECK_PORT}/api/stream-quality" \
             >/dev/null
 
@@ -275,8 +248,6 @@ jobs:
 
           print(urllib.parse.quote(os.environ["ACCESS_TOKEN"], safe=""))
           ')"
-
-          xcrun simctl launch "${udid}" "${{ steps.simulator.outputs.bundle_id }}"
 
           cloudflared tunnel --url "http://127.0.0.1:${SIMDECK_PORT}" --protocol http2 --no-autoupdate > cloudflared.log 2>&1 &
           echo "$!" > cloudflared.pid
@@ -339,6 +310,98 @@ jobs:
       - name: Update status comment with tunnel URL
         run: |
           cat > comment.md <<'EOF'
+          SimDeck iOS session is ready: [Open SimDeck](${{ steps.stream.outputs.url }}?simdeckToken=${{ steps.stream.outputs.access_token }}&device=${{ env.SIMULATOR_UDID }})
+
+          The simulator is booting and the PR app will launch here once its build artifact is installed.
+
+          This session will stop after 30 minutes, or earlier if the simulator shuts down.
+          EOF
+
+          body="$(cat comment.md)"
+          for attempt in {1..5}; do
+            if [[ -n "${SIMDECK_STATUS_COMMENT_ID:-}" ]] && gh api -X PATCH "repos/${REPO}/issues/comments/${SIMDECK_STATUS_COMMENT_ID}" -f body="${body}"; then
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+
+          exit 1
+
+      - name: Resolve PR head
+        id: pr
+        run: |
+          set -euo pipefail
+          echo "sha=$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json headRefOid --jq '.headRefOid')" >> "${GITHUB_OUTPUT}"
+
+      - name: Download simulator artifact for PR head
+        run: |
+          set -euo pipefail
+          sha="${{ steps.pr.outputs.sha }}"
+          artifact_name="ios-simulator-app-${sha}"
+          mkdir -p downloaded-app
+
+          run_id=""
+          for attempt in {1..30}; do
+            run_id="$(gh api --paginate "repos/${REPO}/actions/workflows/build-ios-simulator.yml/runs?per_page=100" \
+              --jq ".workflow_runs[] | select(.head_sha == \"${sha}\" and .conclusion == \"success\") | .id" \
+              | head -n 1 || true)"
+
+            if [[ -n "${run_id}" ]]; then
+              echo "Using build workflow run ${run_id} for ${sha}"
+              gh run download "${run_id}" --repo "${REPO}" --name "${artifact_name}" --dir downloaded-app
+              exit 0
+            fi
+
+            echo "Waiting for a successful iOS simulator build artifact for ${sha} (${attempt}/30)"
+            sleep 20
+          done
+
+          echo "No successful '${artifact_name}' artifact was found for PR head ${sha}." >&2
+          exit 1
+
+      - name: Wait for simulator
+        run: |
+          set -euo pipefail
+          xcrun simctl bootstatus "${SIMULATOR_UDID}" -b || {
+            cat /tmp/sim-boot.log || true
+            exit 1
+          }
+          if [[ -f /tmp/sim-boot-start && -f /tmp/sim-boot-end ]]; then
+            echo "Simulator boot took $(( $(cat /tmp/sim-boot-end) - $(cat /tmp/sim-boot-start) )) seconds."
+          fi
+
+      - name: Install and launch app
+        id: simulator
+        run: |
+          set -euo pipefail
+          app_zip="$(find downloaded-app -name '*.app.zip' -type f | head -n 1)"
+          if [[ -z "${app_zip}" ]]; then
+            echo "No downloaded .app.zip artifact was found" >&2
+            exit 1
+          fi
+
+          mkdir -p unpacked-app
+          ditto -x -k "${app_zip}" unpacked-app
+          app_path="$(find unpacked-app -name '*.app' -type d | head -n 1)"
+          if [[ -z "${app_path}" ]]; then
+            echo "The artifact did not contain an .app bundle" >&2
+            exit 1
+          fi
+
+          udid="${SIMULATOR_UDID}"
+          echo "udid=${udid}" >> "${GITHUB_OUTPUT}"
+          xcrun simctl install "${udid}" "${app_path}"
+
+          bundle_id="$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "${app_path}/Info.plist" 2>/dev/null || true)"
+          if [[ -z "${bundle_id}" || "${bundle_id}" == *'$('* || "${bundle_id}" == *'${'* ]]; then
+            bundle_id="${SIMDECK_BUNDLE_ID}"
+          fi
+          echo "bundle_id=${bundle_id}" >> "${GITHUB_OUTPUT}"
+          xcrun simctl launch "${udid}" "${bundle_id}"
+
+      - name: Update status comment after app launch
+        run: |
+          cat > comment.md <<'EOF'
           SimDeck iOS session is ready: [Open SimDeck](${{ steps.stream.outputs.url }}?simdeckToken=${{ steps.stream.outputs.access_token }}&device=${{ steps.simulator.outputs.udid }})
 
           App: `${{ steps.simulator.outputs.bundle_id }}`
@@ -390,8 +453,8 @@ jobs:
             kill "$(cat simdeck.pid)"
           fi
           simdeck daemon stop
-          if [[ -n "${{ steps.simulator.outputs.udid }}" ]]; then
-            xcrun simctl shutdown "${{ steps.simulator.outputs.udid }}"
+          if [[ -n "${SIMULATOR_UDID:-}" ]]; then
+            xcrun simctl shutdown "${SIMULATOR_UDID}"
           fi
 
       - name: Update status comment at end
