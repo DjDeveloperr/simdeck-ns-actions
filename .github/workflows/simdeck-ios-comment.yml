@@ -79,34 +79,6 @@ jobs:
           set -euo pipefail
           status_body="Starting a SimDeck iOS session for this pull request. I will update this comment with the tunnel URL when it is ready."
 
-          status_comment_ids() {
-            gh api "repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" --jq '
-              map(select(
-                (.user.login == "github-actions[bot]" or .user.login == "github-actions") and
-                (
-                  (.body | startswith("Starting a SimDeck iOS session")) or
-                  (.body | startswith("SimDeck iOS session is ready:")) or
-                  (.body | startswith("SimDeck iOS session for commit"))
-                )
-              ))
-              | reverse
-              | .[].id
-            '
-          }
-
-          for attempt in {1..5}; do
-            while IFS= read -r comment_id; do
-              if [[ -z "${comment_id}" ]]; then
-                continue
-              fi
-              if gh api -X PATCH "repos/${REPO}/issues/comments/${comment_id}" -f body="${status_body}" >/dev/null; then
-                echo "SIMDECK_STATUS_COMMENT_ID=${comment_id}" >> "${GITHUB_ENV}"
-                exit 0
-              fi
-            done < <(status_comment_ids || true)
-            sleep $((attempt * 5))
-          done
-
           for attempt in {1..5}; do
             comment_id="$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="${status_body}" --jq '.id')" && {
               echo "SIMDECK_STATUS_COMMENT_ID=${comment_id}" >> "${GITHUB_ENV}"
