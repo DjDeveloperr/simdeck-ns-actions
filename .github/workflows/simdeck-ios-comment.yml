@@ -535,7 +535,16 @@ jobs:
       - name: Update status comment at end
         if: always()
         run: |
-          body="SimDeck iOS session for commit \`${{ steps.pr.outputs.sha }}\` has ended. Re-run it by commenting \`simdeck run ios\`."
+          set -euo pipefail
+          commit_sha="${{ steps.pr.outputs.sha }}"
+          if [[ -z "${commit_sha}" ]]; then
+            commit_sha="$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)"
+          fi
+          if [[ -z "${commit_sha}" ]]; then
+            commit_sha="${GITHUB_SHA}"
+          fi
+
+          body="SimDeck iOS session for commit \`${commit_sha}\` has ended. Re-run it by commenting \`simdeck run ios\`."
           for attempt in {1..5}; do
             if [[ -n "${SIMDECK_STATUS_COMMENT_ID:-}" ]] && gh api -X PATCH "repos/${REPO}/issues/comments/${SIMDECK_STATUS_COMMENT_ID}" -f body="${body}"; then
               exit 0
