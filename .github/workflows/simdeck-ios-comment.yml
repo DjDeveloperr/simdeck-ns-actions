@@ -24,7 +24,10 @@ jobs:
     if: >-
       ${{
         github.event.issue.pull_request &&
-        github.event.comment.body == 'simdeck run ios'
+        (
+          github.event.comment.body == 'simdeck run ios' ||
+          startsWith(github.event.comment.body, 'simdeck run ios ')
+        )
       }}
     runs-on: macos-26
     timeout-minutes: 35
@@ -33,6 +36,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       PR_NUMBER: ${{ github.event.issue.number }}
+      SIMDECK_COMMENT_BODY: ${{ github.event.comment.body }}
       SIMDECK_PORT: "4310"
       SIMDECK_BUNDLE_ID: dev.dj.simdecknsactions
 
@@ -52,21 +56,79 @@ jobs:
 
           exit 1
 
-      - name: Select Xcode and preboot simulator
+      - name: Resolve experiment flags
+        run: |
+          set -euo pipefail
+          body="${SIMDECK_COMMENT_BODY}"
+          simulator_cache=0
+          device_strategy=small
+
+          if [[ "${body}" == *" cache-sim"* ]]; then
+            simulator_cache=1
+          fi
+          if [[ "${body}" == *" latest-device"* ]]; then
+            device_strategy=latest
+          fi
+
+          echo "SIMDECK_SIMULATOR_CACHE=${simulator_cache}" >> "${GITHUB_ENV}"
+          echo "SIMDECK_DEVICE_STRATEGY=${device_strategy}" >> "${GITHUB_ENV}"
+          echo "Simulator cache experiment: ${simulator_cache}"
+          echo "Device strategy: ${device_strategy}"
+
+      - name: Select Xcode
+        id: xcode
         run: |
           set -euo pipefail
 
-          date +%s > /tmp/sim-boot-start
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           xcodebuild -version
           xcodebuild -showsdks
+          xcode_key="$(xcodebuild -version | shasum -a 256 | awk '{ print $1 }')"
+          echo "cache_key=${xcode_key}" >> "${GITHUB_OUTPUT}"
 
-          udid="$(xcrun simctl list devices available --json | python3 -c '
+      - name: Restore CoreSimulator device cache
+        id: coresim-cache
+        if: env.SIMDECK_SIMULATOR_CACHE == '1'
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/Library/Developer/CoreSimulator/Devices
+          key: coresim-devices-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.cache_key }}-${{ env.SIMDECK_DEVICE_STRATEGY }}-v1
+
+      - name: Select and preboot simulator
+        run: |
+          set -euo pipefail
+          date +%s > /tmp/sim-boot-start
+
+          xcrun simctl list devices available
+          udid="$(xcrun simctl list devices available --json | SIMDECK_DEVICE_STRATEGY="${SIMDECK_DEVICE_STRATEGY}" python3 -c '
           import json
           import re
+          import os
           import sys
 
+          def small_device_score(name: str) -> int:
+              normalized = name.lower()
+              scores = [
+                  ("iphone se", 0),
+                  ("iphone 16e", 1),
+                  ("iphone 15", 2),
+                  ("iphone 16", 3),
+                  ("iphone 17", 4),
+                  ("iphone 14", 5),
+                  ("iphone 13", 6),
+                  ("iphone 12", 7),
+                  ("plus", 30),
+                  ("pro max", 40),
+                  ("pro", 20),
+              ]
+              score = 10
+              for needle, value in scores:
+                  if needle in normalized:
+                      score = min(score, value)
+              return score
+
           data = json.load(sys.stdin)
+          strategy = os.environ.get("SIMDECK_DEVICE_STRATEGY", "small")
           choices = []
           for runtime, devices in data.get("devices", {}).items():
               if "iOS" not in runtime:
@@ -75,14 +137,19 @@ jobs:
               for index, device in enumerate(devices):
                   name = device.get("name", "")
                   if device.get("isAvailable") and "iPhone" in name:
-                      choices.append((version, -index, device["udid"], name))
+                      choices.append((version, index, device["udid"], name))
 
           if not choices:
               raise SystemExit("No available iPhone simulator was found")
 
-          choices.sort(reverse=True)
-          print(choices[0][2])
-          print(f"Selected {choices[0][3]}", file=sys.stderr)
+          if strategy == "latest":
+              choices.sort(key=lambda choice: (choice[0], -choice[1]), reverse=True)
+          else:
+              choices.sort(key=lambda choice: (choice[0], -small_device_score(choice[3]), -choice[1]), reverse=True)
+
+          selected = choices[0]
+          print(selected[2])
+          print(f"Selected {selected[3]} using {strategy} strategy", file=sys.stderr)
           ')"
 
           echo "SIMULATOR_UDID=${udid}" >> "${GITHUB_ENV}"
@@ -359,17 +426,6 @@ jobs:
           echo "No successful '${artifact_name}' artifact was found for PR head ${sha}." >&2
           exit 1
 
-      - name: Wait for simulator
-        run: |
-          set -euo pipefail
-          xcrun simctl bootstatus "${SIMULATOR_UDID}" -b || {
-            cat /tmp/sim-boot.log || true
-            exit 1
-          }
-          if [[ -f /tmp/sim-boot-start && -f /tmp/sim-boot-end ]]; then
-            echo "Simulator boot took $(( $(cat /tmp/sim-boot-end) - $(cat /tmp/sim-boot-start) )) seconds."
-          fi
-
       - name: Install and launch app
         id: simulator
         run: |
@@ -390,14 +446,46 @@ jobs:
 
           udid="${SIMULATOR_UDID}"
           echo "udid=${udid}" >> "${GITHUB_OUTPUT}"
-          xcrun simctl install "${udid}" "${app_path}"
 
           bundle_id="$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "${app_path}/Info.plist" 2>/dev/null || true)"
           if [[ -z "${bundle_id}" || "${bundle_id}" == *'$('* || "${bundle_id}" == *'${'* ]]; then
             bundle_id="${SIMDECK_BUNDLE_ID}"
           fi
           echo "bundle_id=${bundle_id}" >> "${GITHUB_OUTPUT}"
+
+          install_start="$(date +%s)"
+          installed=0
+          for attempt in {1..60}; do
+            if xcrun simctl install "${udid}" "${app_path}"; then
+              installed=1
+              break
+            fi
+            echo "Install attempt ${attempt} failed while simulator is booting; retrying."
+            sleep 3
+          done
+          if [[ "${installed}" -ne 1 ]]; then
+            cat /tmp/sim-boot.log || true
+            echo "Could not install ${app_path} on ${udid}" >&2
+            exit 1
+          fi
+          echo "App install became available after $(( $(date +%s) - install_start )) seconds."
+
+          xcrun simctl bootstatus "${udid}" -b || {
+            cat /tmp/sim-boot.log || true
+            exit 1
+          }
+          if [[ -f /tmp/sim-boot-start && -f /tmp/sim-boot-end ]]; then
+            echo "Simulator boot took $(( $(cat /tmp/sim-boot-end) - $(cat /tmp/sim-boot-start) )) seconds."
+          fi
+
           xcrun simctl launch "${udid}" "${bundle_id}"
+
+      - name: Save CoreSimulator device cache
+        if: env.SIMDECK_SIMULATOR_CACHE == '1' && steps.coresim-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/Library/Developer/CoreSimulator/Devices
+          key: coresim-devices-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.cache_key }}-${{ env.SIMDECK_DEVICE_STRATEGY }}-v1
 
       - name: Update status comment after app launch
         run: |
