@@ -93,9 +93,17 @@ jobs:
         id: pr
         run: |
           set -euo pipefail
-          echo "sha=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.sha')" >> "${GITHUB_OUTPUT}"
-          echo "ref=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.ref')" >> "${GITHUB_OUTPUT}"
-          echo "repo=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.repo.full_name')" >> "${GITHUB_OUTPUT}"
+          gh api "repos/${REPO}/pulls/${PR_NUMBER}" > pr.json
+          python3 - <<'PY' >> "${GITHUB_OUTPUT}"
+          import json
+
+          with open("pr.json", "r", encoding="utf-8") as handle:
+              pr = json.load(handle)
+
+          print(f"sha={pr['head']['sha']}")
+          print(f"ref={pr['head']['ref']}")
+          print(f"repo={pr['head']['repo']['full_name']}")
+          PY
 
       - name: Download simulator artifact for PR head
         run: |
@@ -190,7 +198,7 @@ jobs:
           SIMDECK_VIDEO_CODEC=software \
             SIMDECK_ALLOWED_ORIGINS='*' \
             SIMDECK_REALTIME_STREAM=1 \
-            SIMDECK_STREAM_QUALITY_PROFILE=low \
+            SIMDECK_STREAM_QUALITY_PROFILE=ci-software \
             SIMDECK_REALTIME_MAX_EDGE=720 \
             SIMDECK_REALTIME_FPS=30 \
             SIMDECK_REALTIME_MIN_BITRATE=900000 \
@@ -257,7 +265,7 @@ jobs:
             -X POST \
             -H "Content-Type: application/json" \
             -H "X-SimDeck-Token: ${access_token}" \
-            --data '{"fps":30,"profile":"balanced","videoCodec":"software"}' \
+            --data '{"fps":30,"profile":"ci-software","videoCodec":"software"}' \
             "http://127.0.0.1:${SIMDECK_PORT}/api/stream-quality" \
             >/dev/null
 
