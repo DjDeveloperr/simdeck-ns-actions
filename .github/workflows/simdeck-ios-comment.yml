@@ -24,10 +24,7 @@ jobs:
     if: >-
       ${{
         github.event.issue.pull_request &&
-        (
-          github.event.comment.body == 'simdeck run ios' ||
-          startsWith(github.event.comment.body, 'simdeck run ios ')
-        )
+        startsWith(github.event.comment.body, 'simdeck run ios')
       }}
     runs-on: macos-26
     timeout-minutes: 35
