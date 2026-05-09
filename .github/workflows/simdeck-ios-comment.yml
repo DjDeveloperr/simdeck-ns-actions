@@ -48,6 +48,8 @@ jobs:
         with:
           pr_number: ${{ github.event.issue.number || inputs.pr_number }}
           command: ${{ github.event.comment.body || inputs.command }}
+          command_comment_id: ${{ github.event.comment.id }}
+          command_comment_author: ${{ github.event.comment.user.login }}
           build_workflow: build-ios-simulator.yml
           bundle_id: dev.dj.simdecknsactions
           stream_profile: tiny
