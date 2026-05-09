@@ -73,7 +73,7 @@ jobs:
           simulator_cache=1
           device_strategy=small
           stream_profile=tiny
-          public_health_check=1
+          public_health_check=0
 
           if [[ "${body}" == *" no-cache-sim"* ]]; then
             simulator_cache=0
@@ -86,8 +86,8 @@ jobs:
               stream_profile="${profile}"
             fi
           done
-          if [[ "${body}" == *" no-public-health"* ]]; then
-            public_health_check=0
+          if [[ "${body}" == *" public-health"* ]]; then
+            public_health_check=1
           fi
 
           echo "SIMDECK_SIMULATOR_CACHE=${simulator_cache}" >> "${GITHUB_ENV}"
@@ -207,9 +207,12 @@ jobs:
             > simdeck-daemon.log 2>&1 &
           echo "$!" > simdeck.pid
 
+          cloudflared tunnel --url "http://127.0.0.1:${SIMDECK_PORT}" --protocol http2 --no-autoupdate > cloudflared.log 2>&1 &
+          echo "$!" > cloudflared.pid
+
           local_health_url="http://127.0.0.1:${SIMDECK_PORT}/api/health?simdeckToken=${access_token}"
           local_ready=0
-          for attempt in {1..30}; do
+          for attempt in {1..120}; do
             if ! kill -0 "$(cat simdeck.pid)" 2>/dev/null; then
               cat simdeck-daemon.log >&2
               echo "SimDeck daemon exited before becoming healthy" >&2
@@ -219,7 +222,7 @@ jobs:
               local_ready=1
               break
             fi
-            sleep 1
+            sleep 0.25
           done
           if [[ "${local_ready}" -ne 1 ]]; then
             cat simdeck-daemon.log >&2
@@ -227,55 +230,15 @@ jobs:
             exit 1
           fi
 
-          curl -fsS -D local-root.headers -o /dev/null "http://127.0.0.1:${SIMDECK_PORT}/"
-          daemon_access_token="$(python3 - <<'PY'
-          from http.cookies import SimpleCookie
-
-          token = ""
-          with open("local-root.headers", "r", encoding="utf-8", errors="ignore") as handle:
-              for line in handle:
-                  name, _, value = line.partition(":")
-                  if name.lower() != "set-cookie":
-                      continue
-                  cookie = SimpleCookie()
-                  cookie.load(value.strip())
-                  if "simdeck_token" in cookie:
-                      token = cookie["simdeck_token"].value
-          print(token)
-          PY
-          )"
-          if [[ -z "${daemon_access_token}" ]]; then
-            cat local-root.headers >&2
-            echo "SimDeck root response did not set a simdeck_token cookie" >&2
-            exit 1
-          fi
-          access_token="${daemon_access_token}"
-
-          curl -fsS \
-            -X POST \
-            -H "Content-Type: application/json" \
-            -H "X-SimDeck-Token: ${access_token}" \
-            --data "{\"profile\":\"${SIMDECK_STREAM_PROFILE}\",\"videoCodec\":\"software\"}" \
-            "http://127.0.0.1:${SIMDECK_PORT}/api/stream-quality" \
-            >/dev/null
-
-          encoded_access_token="$(ACCESS_TOKEN="${access_token}" python3 -c '
-          import os
-          import urllib.parse
-
-          print(urllib.parse.quote(os.environ["ACCESS_TOKEN"], safe=""))
-          ')"
-
-          cloudflared tunnel --url "http://127.0.0.1:${SIMDECK_PORT}" --protocol http2 --no-autoupdate > cloudflared.log 2>&1 &
-          echo "$!" > cloudflared.pid
+          encoded_access_token="${access_token}"
 
           tunnel_url=""
-          for attempt in {1..60}; do
+          for attempt in {1..120}; do
             tunnel_url="$(grep -Eo 'https://[-a-zA-Z0-9.]+\.trycloudflare\.com' cloudflared.log | head -n 1 || true)"
             if [[ -n "${tunnel_url}" ]]; then
               break
             fi
-            sleep 2
+            sleep 0.25
           done
 
           if [[ -z "${tunnel_url}" ]]; then
