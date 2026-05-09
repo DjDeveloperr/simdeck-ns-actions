@@ -407,7 +407,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/Library/Developer/CoreSimulator/Devices
-          key: coresim-selected-device-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.cache_key }}-${{ env.SIMDECK_DEVICE_STRATEGY }}-v1
+          key: coresim-devices-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.cache_key }}-${{ env.SIMDECK_DEVICE_STRATEGY }}-v1
 
       - name: Select and preboot simulator
         run: |
@@ -554,28 +554,12 @@ jobs:
             echo "Simulator boot took $(( $(cat /tmp/sim-boot-end) - $(cat /tmp/sim-boot-start) )) seconds."
           fi
 
-      - name: Prune CoreSimulator device cache
-        if: env.SIMDECK_SIMULATOR_CACHE == '1' && steps.coresim-cache.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          devices_dir="${HOME}/Library/Developer/CoreSimulator/Devices"
-          selected="${SIMULATOR_UDID}"
-
-          find "${devices_dir}" -mindepth 1 -maxdepth 1 -type d -name '????????-????-????-????-????????????' -print0 |
-            while IFS= read -r -d '' device_dir; do
-              if [[ "$(basename "${device_dir}")" != "${selected}" ]]; then
-                rm -rf "${device_dir}"
-              fi
-            done
-
-          du -sh "${devices_dir}" || true
-
       - name: Save CoreSimulator device cache
         if: env.SIMDECK_SIMULATOR_CACHE == '1' && steps.coresim-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/Library/Developer/CoreSimulator/Devices
-          key: coresim-selected-device-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.cache_key }}-${{ env.SIMDECK_DEVICE_STRATEGY }}-v1
+          key: coresim-devices-${{ runner.os }}-${{ runner.arch }}-${{ steps.xcode.outputs.cache_key }}-${{ env.SIMDECK_DEVICE_STRATEGY }}-v1
 
       - name: Update status comment after app launch
         run: |
