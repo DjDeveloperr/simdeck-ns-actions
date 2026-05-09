@@ -72,7 +72,7 @@ jobs:
           body="${SIMDECK_COMMENT_BODY}"
           simulator_cache=1
           device_strategy=small
-          stream_profile=nano
+          stream_profile=tiny
           public_health_check=1
 
           if [[ "${body}" == *" no-cache-sim"* ]]; then
@@ -81,7 +81,7 @@ jobs:
           if [[ "${body}" == *" latest-device"* ]]; then
             device_strategy=latest
           fi
-          for profile in nano micro tiny low ci-software; do
+          for profile in tiny low ci-software; do
             if [[ "${body}" == *" ${profile}"* || "${body}" == *" quality=${profile}"* ]]; then
               stream_profile="${profile}"
             fi
@@ -153,18 +153,6 @@ jobs:
           access_token="$(openssl rand -hex 32)"
           metadata_path="${RUNNER_TEMP:-/tmp}/simdeck-daemon-${GITHUB_RUN_ID}.json"
           case "${SIMDECK_STREAM_PROFILE}" in
-            nano)
-              stream_max_edge=320
-              stream_fps=15
-              stream_min_bitrate=250000
-              stream_bits_per_pixel=1
-              ;;
-            micro)
-              stream_max_edge=360
-              stream_fps=20
-              stream_min_bitrate=350000
-              stream_bits_per_pixel=1
-              ;;
             tiny)
               stream_max_edge=540
               stream_fps=24
