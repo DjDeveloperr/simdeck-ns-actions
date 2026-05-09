@@ -51,24 +51,25 @@ jobs:
       SIMDECK_BUNDLE_ID: dev.dj.simdecknsactions
 
     steps:
-      - name: Create status comment
+      - name: Create status comment and resolve flags
         run: |
           set -euo pipefail
           status_body="Starting a SimDeck iOS session for this pull request. I will update this comment with the tunnel URL when it is ready."
+          status_comment_id=""
 
           for attempt in {1..5}; do
-            comment_id="$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="${status_body}" --jq '.id')" && {
-              echo "SIMDECK_STATUS_COMMENT_ID=${comment_id}" >> "${GITHUB_ENV}"
-              exit 0
-            }
+            if comment_id="$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="${status_body}" --jq '.id')"; then
+              status_comment_id="${comment_id}"
+              echo "SIMDECK_STATUS_COMMENT_ID=${status_comment_id}" >> "${GITHUB_ENV}"
+              break
+            fi
             sleep $((attempt * 5))
           done
 
-          exit 1
+          if [[ -z "${status_comment_id}" ]]; then
+            exit 1
+          fi
 
-      - name: Resolve experiment flags
-        run: |
-          set -euo pipefail
           body="${SIMDECK_COMMENT_BODY}"
           simulator_cache=1
           device_strategy=small
@@ -98,7 +99,8 @@ jobs:
           echo "Device strategy: ${device_strategy}"
           echo "Stream profile: ${stream_profile}"
 
-      - name: Install SimDeck and Cloudflare Tunnel
+      - name: Install tools, start SimDeck and tunnel
+        id: stream
         run: |
           set -euo pipefail
           npm_prefix="${GITHUB_WORKSPACE}/.tools/npm-global"
@@ -109,6 +111,10 @@ jobs:
 
           export NPM_CONFIG_PREFIX="${npm_prefix}"
           export PATH="${bin_dir}:${npm_prefix}/bin:${cloudflared_dir}:${PATH}"
+
+          echo "${bin_dir}" >> "${GITHUB_PATH}"
+          echo "${npm_prefix}/bin" >> "${GITHUB_PATH}"
+          echo "${cloudflared_dir}" >> "${GITHUB_PATH}"
 
           (
             metadata="$(curl -fsSL https://registry.npmjs.org/simdeck/latest)"
@@ -140,16 +146,8 @@ jobs:
           wait "${simdeck_install_pid}"
           wait "${cloudflared_install_pid}"
 
-          echo "${bin_dir}" >> "${GITHUB_PATH}"
-          echo "${npm_prefix}/bin" >> "${GITHUB_PATH}"
-          echo "${cloudflared_dir}" >> "${GITHUB_PATH}"
           simdeck --version
           cloudflared --version
-
-      - name: Start SimDeck and tunnel
-        id: stream
-        run: |
-          set -euo pipefail
           access_token="$(openssl rand -hex 32)"
           metadata_path="${RUNNER_TEMP:-/tmp}/simdeck-daemon-${GITHUB_RUN_ID}.json"
           case "${SIMDECK_STREAM_PROFILE}" in
@@ -250,6 +248,22 @@ jobs:
           echo "url=${tunnel_url}" >> "${GITHUB_OUTPUT}"
           echo "access_token=${encoded_access_token}" >> "${GITHUB_OUTPUT}"
 
+          cat > comment.md <<EOF
+          SimDeck iOS session is ready: [Open SimDeck](${tunnel_url}?simdeckToken=${encoded_access_token})
+
+          The simulator is starting and the PR app will launch here once its build artifact is installed.
+
+          This session will stop after 30 minutes, or earlier if the simulator shuts down.
+          EOF
+
+          body="$(cat comment.md)"
+          for attempt in {1..5}; do
+            if [[ -n "${SIMDECK_STATUS_COMMENT_ID:-}" ]] && gh api -X PATCH "repos/${REPO}/issues/comments/${SIMDECK_STATUS_COMMENT_ID}" -f body="${body}"; then
+              break
+            fi
+            sleep $((attempt * 5))
+          done
+
           public_health_url="${tunnel_url}/api/health?simdeckToken=${encoded_access_token}"
           tunnel_host="${tunnel_url#https://}"
           tunnel_host="${tunnel_host%%/*}"
@@ -289,26 +303,6 @@ jobs:
 
           echo "SimDeck public health check failed through Cloudflare Tunnel" >&2
           cat cloudflared.log >&2
-          exit 1
-
-      - name: Update status comment with tunnel URL
-        run: |
-          cat > comment.md <<'EOF'
-          SimDeck iOS session is ready: [Open SimDeck](${{ steps.stream.outputs.url }}?simdeckToken=${{ steps.stream.outputs.access_token }})
-
-          The simulator is starting and the PR app will launch here once its build artifact is installed.
-
-          This session will stop after 30 minutes, or earlier if the simulator shuts down.
-          EOF
-
-          body="$(cat comment.md)"
-          for attempt in {1..5}; do
-            if [[ -n "${SIMDECK_STATUS_COMMENT_ID:-}" ]] && gh api -X PATCH "repos/${REPO}/issues/comments/${SIMDECK_STATUS_COMMENT_ID}" -f body="${body}"; then
-              exit 0
-            fi
-            sleep $((attempt * 5))
-          done
-
           exit 1
 
       - name: Resolve PR head
