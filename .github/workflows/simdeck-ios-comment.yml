@@ -354,6 +354,42 @@ jobs:
           set -euo pipefail
           echo "sha=$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json headRefOid --jq '.headRefOid')" >> "${GITHUB_OUTPUT}"
 
+      - name: Start simulator artifact download
+        run: |
+          set -euo pipefail
+          sha="${{ steps.pr.outputs.sha }}"
+          artifact_name="ios-simulator-app-${sha}"
+          mkdir -p downloaded-app
+          rm -f /tmp/simdeck-artifact-download.status app-download.log
+
+          (
+            set +e
+            {
+              run_id=""
+              for attempt in {1..30}; do
+                run_id="$(gh api --paginate "repos/${REPO}/actions/workflows/build-ios-simulator.yml/runs?per_page=100" \
+                  --jq ".workflow_runs[] | select(.head_sha == \"${sha}\" and .conclusion == \"success\") | .id" \
+                  | head -n 1 || true)"
+
+                if [[ -n "${run_id}" ]]; then
+                  echo "Using build workflow run ${run_id} for ${sha}"
+                  gh run download "${run_id}" --repo "${REPO}" --name "${artifact_name}" --dir downloaded-app
+                  exit_code="$?"
+                  echo "${exit_code}" > /tmp/simdeck-artifact-download.status
+                  exit "${exit_code}"
+                fi
+
+                echo "Waiting for a successful iOS simulator build artifact for ${sha} (${attempt}/30)"
+                sleep 20
+              done
+
+              echo "No successful '${artifact_name}' artifact was found for PR head ${sha}." >&2
+              echo "1" > /tmp/simdeck-artifact-download.status
+              exit 1
+            } > app-download.log 2>&1
+          ) &
+          echo "$!" > /tmp/simdeck-artifact-download.pid
+
       - name: Select Xcode
         id: xcode
         run: |
@@ -438,31 +474,20 @@ jobs:
             date +%s > /tmp/sim-boot-end
           ) &
 
-      - name: Download simulator artifact for PR head
+      - name: Wait for simulator artifact download
         run: |
           set -euo pipefail
-          sha="${{ steps.pr.outputs.sha }}"
-          artifact_name="ios-simulator-app-${sha}"
-          mkdir -p downloaded-app
 
-          run_id=""
-          for attempt in {1..30}; do
-            run_id="$(gh api --paginate "repos/${REPO}/actions/workflows/build-ios-simulator.yml/runs?per_page=100" \
-              --jq ".workflow_runs[] | select(.head_sha == \"${sha}\" and .conclusion == \"success\") | .id" \
-              | head -n 1 || true)"
-
-            if [[ -n "${run_id}" ]]; then
-              echo "Using build workflow run ${run_id} for ${sha}"
-              gh run download "${run_id}" --repo "${REPO}" --name "${artifact_name}" --dir downloaded-app
-              exit 0
-            fi
-
-            echo "Waiting for a successful iOS simulator build artifact for ${sha} (${attempt}/30)"
-            sleep 20
+          pid="$(cat /tmp/simdeck-artifact-download.pid)"
+          while kill -0 "${pid}" 2>/dev/null; do
+            sleep 2
           done
 
-          echo "No successful '${artifact_name}' artifact was found for PR head ${sha}." >&2
-          exit 1
+          cat app-download.log
+          status="$(cat /tmp/simdeck-artifact-download.status 2>/dev/null || echo 1)"
+          if [[ "${status}" -ne 0 ]]; then
+            exit "${status}"
+          fi
 
       - name: Install and launch app
         id: simulator
